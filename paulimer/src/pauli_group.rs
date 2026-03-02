@@ -174,45 +174,81 @@ impl PauliGroup {
     }
 
     /// Returns a factorization of the given element in terms of generators of the group.
-    /// The product of each item in the return value must equal the original element.
+    /// The product of all items in the return value equals the original element.
     /// Returns None if no factorization exists (i.e., the element is not in the group).
+    ///
+    /// # Panics
+    ///
+    /// This function should not panic in normal use. The internal `unwrap()` is safe because
+    /// `factorizations_of` always returns exactly one result per input element.
     pub fn factorization_of(&self, element: &SparsePauli) -> Option<Vec<SparsePauli>> {
-        self.factorizations_of(std::slice::from_ref(element))[0].clone()
+        self.factorizations_of(std::slice::from_ref(element))
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     /// Returns factorizations of the given elements in terms of generators of the group.
+    pub fn factorizations_of(&self, elements: &[SparsePauli]) -> Vec<Option<Vec<SparsePauli>>> {
+        self.indexed_factorizations_of(elements)
+            .into_iter()
+            .map(|o| {
+                o.map(|(indexes, phase)| {
+                    let mut factors: Vec<SparsePauli> = indexes.iter().map(|&i| self.generators[i].clone()).collect();
+                    if phase != 0 {
+                        let mut phase_element = SparsePauli::neutral_element_of_size(self.support().len());
+                        phase_element.assign_phase_exp(phase);
+                        factors.push(phase_element);
+                    }
+                    factors
+                })
+            })
+            .collect()
+    }
+
+    /// Returns factorization indexes and phase for the given element.
+    ///
+    /// # Panics
+    ///
+    /// This function should not panic in normal use. The internal `unwrap()` is safe because
+    /// `indexed_factorizations_of` always returns exactly one result per input element.
+    pub fn indexed_factorization_of(&self, element: &SparsePauli) -> Option<(Vec<usize>, Exponent)> {
+        self.indexed_factorizations_of(std::slice::from_ref(element))
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    /// Returns factorization indexes and phase for each of the given elements.
     ///
     /// # Panics
     ///
     /// This function should not panic in normal use. The internal `unwrap()` is safe because
     /// the filtering and reconstruction logic ensures that each input element corresponds to
-    /// exactly one position in the iterator: supported elements produce one factorization,
-    /// and unsupported elements produce `None`. The iterator of factorizations is constructed
-    /// to have exactly as many items as there are supported elements, and `next()` is called
-    /// only for those elements, so the `unwrap()` cannot observe `None`.
-    pub fn factorizations_of(&self, elements: &[SparsePauli]) -> Vec<Option<Vec<SparsePauli>>> {
+    /// exactly one position in the iterator.
+    pub fn indexed_factorizations_of(&self, elements: &[SparsePauli]) -> Vec<Option<(Vec<usize>, Exponent)>> {
         let group_support = self.support();
         let is_supported = |e: &SparsePauli| {
             e.support()
                 .is_subset(group_support.iter().copied().assume_sorted_by_item())
         };
 
-        let valid_elements: Vec<_> = elements.iter().filter(|e| is_supported(e)).collect();
+        let supported: Vec<bool> = elements.iter().map(is_supported).collect();
+        let valid_elements: Vec<_> = elements
+            .iter()
+            .zip(&supported)
+            .filter_map(|(e, &s)| s.then_some(e))
+            .collect();
         let element_bits = as_bitmatrix(&valid_elements, group_support);
+
         let mut factorizations = element_bits
             .rows()
             .zip(&valid_elements)
             .map(|(row, e)| self.factorize(&row, e.xz_phase_exponent()));
 
-        elements
+        supported
             .iter()
-            .map(|e| {
-                if is_supported(e) {
-                    factorizations.next().unwrap()
-                } else {
-                    None
-                }
-            })
+            .map(|&s| if s { factorizations.next().unwrap() } else { None })
             .collect()
     }
 
@@ -226,27 +262,20 @@ impl PauliGroup {
         &self.standard_form().echelon_form.transform
     }
 
-    fn factorize(&self, row: &AlignedBitView, exponent: Exponent) -> Option<Vec<SparsePauli>> {
+    fn factorize(&self, row: &AlignedBitView, exponent: Exponent) -> Option<(Vec<usize>, Exponent)> {
         let generator_indexes = self.echelon_form().transpose_solve(row)?;
-        let mut factorization: Vec<SparsePauli> = generator_indexes
-            .support()
-            .map(|index| self.generators[index].clone())
-            .collect();
+        let indexes: Vec<_> = generator_indexes.support().collect();
         let mut product = SparsePauli::default_size_neutral_element();
-        for factor in &factorization {
-            product.mul_assign_right(factor);
+        for &index in &indexes {
+            product.mul_assign_right(&self.generators[index]);
         }
         let remaining_phase = exponent.wrapping_sub(product.xz_phase_exponent()) % 4;
 
         if !self.phases().contains(&remaining_phase) {
             return None;
-        } else if remaining_phase != 0 {
-            let mut phase_element = SparsePauli::neutral_element_of_size(self.support().len());
-            phase_element.assign_phase_exp(remaining_phase);
-            factorization.push(phase_element);
         }
 
-        Some(factorization)
+        Some((indexes, remaining_phase))
     }
 
     pub fn elements(&self) -> Box<dyn Iterator<Item = SparsePauli> + Send + Sync> {
@@ -845,7 +874,7 @@ fn basis_over(support: &[usize], excluding: &[usize]) -> Vec<SparsePauli> {
     basis
 }
 
-fn as_bitmatrix<P: std::borrow::Borrow<SparsePauli>>(generators: &[P], supported_by: &[usize]) -> AlignedBitMatrix {
+pub fn as_bitmatrix<P: std::borrow::Borrow<SparsePauli>>(generators: &[P], supported_by: &[usize]) -> AlignedBitMatrix {
     let support_map: HashMap<usize, usize> = supported_by.iter().copied().zip(0usize..).collect();
     let support_length = supported_by.len();
 
@@ -863,7 +892,7 @@ fn as_bitmatrix<P: std::borrow::Borrow<SparsePauli>>(generators: &[P], supported
     bitmatrix
 }
 
-fn as_sparse_pauli(bits: &AlignedBitView, phase: Exponent, support: &[usize]) -> SparsePauli {
+pub fn as_sparse_pauli(bits: &AlignedBitView, phase: Exponent, support: &[usize]) -> SparsePauli {
     let length = support.len();
     let (x_indexes, z_indexes): (IndexSet, IndexSet) = bits.support().partition(|&index| index < length);
     let x_bits: IndexSet = x_indexes.into_iter().map(|index| support[index]).collect();
@@ -871,7 +900,8 @@ fn as_sparse_pauli(bits: &AlignedBitView, phase: Exponent, support: &[usize]) ->
     SparsePauli::from_bits(x_bits, z_bits, phase)
 }
 
-fn as_sparse_paulis(bitmatrix: &AlignedBitMatrix, support: &[usize]) -> Vec<SparsePauli> {
+#[must_use]
+pub fn as_sparse_paulis(bitmatrix: &AlignedBitMatrix, support: &[usize]) -> Vec<SparsePauli> {
     bitmatrix.rows().map(|row| as_sparse_pauli(&row, 0, support)).collect()
 }
 

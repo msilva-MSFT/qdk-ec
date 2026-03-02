@@ -597,7 +597,9 @@ proptest! {
 mod factorization_tests {
     use super::*;
     use crate::NeutralElement;
+    use binar::matrix::complete_to_full_rank_row_basis;
     use paulimer::pauli::{PauliBinaryOps, PauliMutable};
+    use paulimer::pauli_group::{as_bitmatrix, as_sparse_paulis};
 
     #[test]
     fn test_factorization_of_identity() {
@@ -1062,6 +1064,78 @@ mod factorization_tests {
         ];
         let symplectic_basis1 = symplectic_form_of(&basis1);
         assert!(is_symplectic(&symplectic_basis1));
+    }
+
+    /// Returns a `SparsePauli` that is guaranteed not to be in the given group,
+    /// or `None` if the group is full rank over its support (i.e., every Pauli
+    /// on those qubits is already a member).
+    fn non_member_of(group: &PauliGroup) -> Option<SparsePauli> {
+        let rank = group.binary_rank();
+        if rank == 0 {
+            return Some(SparsePauli::from_str("X").unwrap());
+        }
+
+        let support = group.support();
+        let generators = &group.standard_generators()[..rank];
+        let matrix = as_bitmatrix(generators, support);
+        let full = complete_to_full_rank_row_basis(&matrix).expect("standard generators must be linearly independent");
+
+        as_sparse_paulis(&full, support).into_iter().nth(rank)
+    }
+
+    proptest! {
+        #[test]
+        fn test_indexed_factorization_of_generator_product(
+            group in small_pauli_group(),
+            subset_index in any::<usize>(),
+        ) {
+            let generators = group.generators();
+            let powerset_size = 1usize << generators.len();
+
+            // Pick a random subset of generators and multiply them together.
+            let subset: Vec<_> = generators
+                .iter()
+                .powerset()
+                .nth(subset_index % powerset_size)
+                .unwrap();
+            let element = subset.iter().fold(
+                SparsePauli::default_size_neutral_element(),
+                |mut acc, g| { acc.mul_assign_right(*g); acc },
+            );
+
+            let (indexes, phase) = group
+                .indexed_factorization_of(&element)
+                .unwrap_or_else(|| panic!("expected Some for product of generators"));
+
+            // Each index must be valid.
+            for &idx in &indexes {
+                prop_assert!(idx < generators.len());
+            }
+
+            // Reconstruct the element from indexes + phase and verify.
+            let mut reconstructed = SparsePauli::default_size_neutral_element();
+            for &idx in &indexes {
+                reconstructed.mul_assign_right(&generators[idx]);
+            }
+            if phase != 0 {
+                reconstructed.add_assign_phase_exp(phase);
+            }
+            prop_assert_eq!(&reconstructed, &element);
+        }
+
+        #[test]
+        fn test_indexed_factorization_of_non_member(group in small_pauli_group()) {
+            let non_member = non_member_of(&group);
+            prop_assume!(non_member.is_some(), "group is full rank, no non-member exists");
+            let non_member = non_member.unwrap();
+            let result = group.indexed_factorization_of(&non_member);
+            prop_assert!(
+                result.is_none(),
+                "expected None for non-member {:?}, got {:?}",
+                non_member,
+                result
+            );
+        }
     }
 }
 

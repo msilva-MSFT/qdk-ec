@@ -131,6 +131,21 @@ impl PyPauliGroup {
             .collect()
     }
 
+    fn indexed_factorization_of(&self, element: &PySparsePauli) -> Option<(Vec<usize>, usize)> {
+        self.inner
+            .indexed_factorization_of(&element.inner)
+            .map(|(indexes, phase)| (indexes, phase as usize))
+    }
+
+    fn indexed_factorizations_of(&self, elements: &Bound<'_, PyAny>) -> Vec<Option<(Vec<usize>, usize)>> {
+        let sparse_elements = to_sparse_pauli_vec(elements);
+        self.inner
+            .indexed_factorizations_of(sparse_elements.as_slice())
+            .into_iter()
+            .map(|opt| opt.map(|(indexes, phase)| (indexes, phase as usize)))
+            .collect()
+    }
+
     #[getter]
     fn is_abelian(&self) -> bool {
         self.inner.is_abelian()
